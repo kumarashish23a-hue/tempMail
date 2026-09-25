@@ -94,19 +94,26 @@ src/
 - **Settings** page: Light / Dark / System theme, default expiration,
   notifications toggle (UI only).
 
-## Receiving real emails (not connected yet)
+## Receiving real emails (infrastructure built, needs your domain)
 
-To receive actual emails sent to these addresses you need, in order:
+The inbound pipeline is implemented and ready — it just needs a domain you
+own plus 10 minutes in the Cloudflare dashboard:
 
-1. A **domain you own** (e.g. from Cloudflare or Namecheap, ~₹800–1000/year).
-2. An **inbound email service** — Mailgun, SendGrid Inbound Parse, or
-   Cloudflare Email Workers (all have free tiers). Point your domain's MX
-   records at it.
-3. A **Supabase Edge Function** as the webhook target: the email service POSTs
-   each incoming email to it, and the function inserts a row into the `emails`
-   table. The inbox then shows real mail on the next refresh.
+- **`cloudflare-email-worker/`** — Cloudflare Email Worker: receives mail via
+  Email Routing, parses it with `postal-mime`, normalizes the recipient, and
+  POSTs it to the backend webhook with a Bearer secret (one retry on 5xx,
+  never on 4xx). No database, no business logic inside.
+- **`supabase/functions/inbound-email/`** — Supabase Edge Function = the
+  backend webhook. Verifies the secret, validates input, finds the mailbox,
+  rejects expired mailboxes, ignores duplicate `providerMessageId`s, extracts
+  the OTP, and inserts the email into Postgres.
+- **`supabase/migrations/20260925_inbound_email.sql`** — adds
+  `provider_message_id` (unique) for duplicate protection.
 
-Until then, inboxes only contain the welcome email.
+**Setup:** follow `CLOUDFLARE_SETUP.md` (domain → Cloudflare DNS → Email
+Routing rule `*@yourdomain.com` → Worker → webhook → Postgres → inbox).
+
+Until a domain is connected, inboxes only contain the welcome email.
 
 ## Limitations (on purpose)
 
