@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useCountdown } from "../hooks/useCountdown";
 import {
@@ -9,7 +9,7 @@ import {
   getUnreadCount,
   isExpired,
   markEmailAsRead,
-  simulateIncomingEmail,
+  refreshInbox,
 } from "../services/emailService";
 import type { TemporaryEmail } from "../types";
 import { CopyButton } from "./CopyButton";
@@ -18,6 +18,7 @@ import { EmailViewer } from "./EmailViewer";
 import { EmptyState } from "./EmptyState";
 import { ExpirationBadge } from "./ExpirationBadge";
 import { InboxList } from "./InboxList";
+import { LoadingState } from "./LoadingState";
 import { UsageList } from "./UsageList";
 
 interface EmailDashboardProps {
@@ -31,17 +32,65 @@ interface EmailDashboardProps {
  */
 export function EmailDashboard({ accountId }: EmailDashboardProps) {
   const navigate = useNavigate();
-  const [account, setAccount] = useState<TemporaryEmail | null>(() => getAccount(accountId) ?? null);
+  const [account, setAccount] = useState<TemporaryEmail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const reload = useCallback(() => {
-    setAccount(getAccount(accountId) ?? null);
+  const reload = useCallback(async () => {
+    try {
+      setAccount((await getAccount(accountId)) ?? null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Could not load this email.");
+    }
+  }, [accountId]);
+
+  // `key` from the parent remounts this component per address, so this effect
+  // only runs on mount.
+  useEffect(() => {
+    let cancelled = false;
+    getAccount(accountId).then(
+      (a) => {
+        if (cancelled) return;
+        setAccount(a ?? null);
+        setLoading(false);
+      },
+      (e: unknown) => {
+        if (cancelled) return;
+        setLoadError(e instanceof Error ? e.message : "Could not load this email.");
+        setLoading(false);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, [accountId]);
 
   // Live tick so the UI flips to "Expired" the second the timer hits zero.
   // `expired` is derived during render — no effect needed.
   const { expired: timerExpired } = useCountdown(account?.expiresAt ?? "");
   const expired = !account || isExpired(account) || timerExpired;
+
+  if (loading) {
+    return <LoadingState message="Loading inbox..." />;
+  }
+
+  if (loadError) {
+    return (
+      <EmptyState
+        title="Couldn't load this email"
+        message={loadError}
+        action={
+          <Link
+            to="/"
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
+          >
+            Create a new email
+          </Link>
+        }
+      />
+    );
+  }
 
   if (!account) {
     return (
@@ -63,32 +112,32 @@ export function EmailDashboard({ accountId }: EmailDashboardProps) {
   const unread = getUnreadCount(account);
   const selectedEmail = account.emails.find((e) => e.id === selectedId) ?? null;
 
-  const handleRefresh = () => {
+  const handleRefresh = async () => {
     if (expired) return;
-    simulateIncomingEmail(accountId);
-    reload();
+    await refreshInbox(accountId);
+    await reload();
   };
 
-  const handleSelect = (id: string) => {
-    markEmailAsRead(accountId, id);
+  const handleSelect = async (id: string) => {
+    await markEmailAsRead(accountId, id);
     setSelectedId(id);
-    reload();
+    await reload();
   };
 
-  const handleDeleteEmail = (id: string) => {
-    deleteInboxEmail(accountId, id);
+  const handleDeleteEmail = async (id: string) => {
+    await deleteInboxEmail(accountId, id);
     if (selectedId === id) setSelectedId(null);
-    reload();
+    await reload();
   };
 
-  const handleAddWebsite = (website: string) => {
-    addWebsiteUsage(accountId, website);
-    reload();
+  const handleAddWebsite = async (website: string) => {
+    await addWebsiteUsage(accountId, website);
+    await reload();
   };
 
-  const handleDeleteAccount = () => {
-    if (window.confirm(`Delete ${account.address}? This only removes the demo data.`)) {
-      deleteAccount(accountId);
+  const handleDeleteAccount = async () => {
+    if (window.confirm(`Delete ${account.address}? This removes it from the database.`)) {
+      await deleteAccount(accountId);
       navigate("/emails");
     }
   };

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { EmailGenerator } from "../components/EmailGenerator";
+import { SupabaseSetupNotice } from "../components/SupabaseSetupNotice";
 import { siteConfig } from "../config/siteConfig";
 
 const FEATURES = [
@@ -14,7 +15,7 @@ const FEATURES = [
   },
   {
     title: "See where it was used",
-    text: "Keep a simple list of the websites each temporary address was used on — all mock data in this prototype.",
+    text: "Keep a simple list of the websites each temporary address was used on — stored in Supabase.",
   },
 ];
 
@@ -57,7 +58,8 @@ export function HomePage() {
       </section>
 
       {/* Generator card */}
-      <section id="create" className="mx-auto max-w-2xl scroll-mt-24">
+      <section id="create" className="mx-auto max-w-2xl scroll-mt-24 space-y-4">
+        <SupabaseSetupNotice />
         <EmailGenerator onCreated={(account) => navigate(`/email/${account.id}`)} />
       </section>
 

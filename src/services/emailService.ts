@@ -1,23 +1,109 @@
 import { siteConfig } from "../config/siteConfig";
-import { buildSeedAccounts } from "../data/mockAccounts";
-import { mockInboxTemplates } from "../data/mockEmails";
+import { requireSupabase } from "../lib/supabase";
 import type { Email, TemporaryEmail, WebsiteUsage } from "../types";
 
-// ─── Demo service layer ─────────────────────────────────────────────────────
-// Every function below works with mock data + localStorage. There are NO
-// network requests anywhere in this file.
+// ─── Supabase-backed service layer ──────────────────────────────────────────
+// Every function below talks to Supabase (Postgres) instead of mock data.
+// There are no other network calls in the app: the UI only ever calls the
+// functions in this file, so this is the single place to change if the
+// backend ever moves.
 //
-// TO CONNECT A REAL BACKEND LATER: replace the body of each function with a
-// fetch() call to your API (e.g. POST /api/emails, GET /api/emails/:id/inbox).
-// The UI only ever calls these functions, so nothing else needs to change.
+// Tables (created via the SQL in the README):
+//   temp_addresses  — one row per temporary email address
+//   emails          — inbox messages, linked by address_id
+//   website_usage   — "where was this address used" rows
+//
+// "My" addresses: because there is no login, the browser keeps the list of
+// address IDs it created in localStorage. getAccounts() only returns those,
+// so you never see other people's addresses.
 
-const STORAGE_KEY = "tempmail.accounts.v1";
+// ─── DB row shapes (snake_case) ─────────────────────────────────────────────
 
-function randomId(prefix: string): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return `${prefix}-${crypto.randomUUID()}`;
+interface AddressRow {
+  id: string;
+  address: string;
+  created_at: string;
+  expires_at: string;
+}
+
+interface EmailRow {
+  id: string;
+  address_id: string;
+  sender_name: string;
+  sender_email: string;
+  subject: string;
+  body: string;
+  otp: string | null;
+  is_read: boolean;
+  received_at: string;
+}
+
+interface UsageRow {
+  id: string;
+  address_id: string;
+  website: string;
+  first_seen_at: string;
+}
+
+// ─── "My addresses" tracking (localStorage) ─────────────────────────────────
+
+const MY_IDS_KEY = "tempmail.my-address-ids.v1";
+
+function readMyIds(): string[] {
+  try {
+    const raw = localStorage.getItem(MY_IDS_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
   }
-  return `${prefix}-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9)}`;
+}
+
+function addMyId(id: string): void {
+  try {
+    const ids = readMyIds();
+    if (!ids.includes(id)) {
+      localStorage.setItem(MY_IDS_KEY, JSON.stringify([id, ...ids]));
+    }
+  } catch {
+    // Storage unavailable — the app still works, the list just won't persist.
+  }
+}
+
+function removeMyId(id: string): void {
+  try {
+    localStorage.setItem(MY_IDS_KEY, JSON.stringify(readMyIds().filter((x) => x !== id)));
+  } catch {
+    // ignore
+  }
+}
+
+// ─── Mappers (DB rows → app types) ──────────────────────────────────────────
+
+function toEmail(row: EmailRow): Email {
+  return {
+    id: row.id,
+    senderName: row.sender_name,
+    sender: row.sender_email,
+    subject: row.subject,
+    body: row.body,
+    otp: row.otp ?? undefined,
+    receivedAt: row.received_at,
+    read: row.is_read,
+    hasAttachments: false,
+  };
+}
+
+function toUsage(row: UsageRow): WebsiteUsage {
+  return {
+    website: row.website,
+    firstSeen: row.first_seen_at,
+    status: "active",
+  };
+}
+
+function freshStatus(expiresAt: string): TemporaryEmail["status"] {
+  return new Date(expiresAt).getTime() <= Date.now() ? "expired" : "active";
 }
 
 const USERNAME_WORDS = [
@@ -31,179 +117,181 @@ function randomUsername(): string {
   return `${word}${num}`;
 }
 
-/** Demo inbox: a new address starts with 3 mock emails, 2/5/8 minutes old. */
-function seedInbox(now: number): Email[] {
-  const offsetsMinutes = [2, 5, 8];
-  return offsetsMinutes.map((offset, i) => {
-    const t = mockInboxTemplates[i % mockInboxTemplates.length];
-    return {
-      id: randomId("email"),
-      senderName: t.senderName,
-      sender: t.sender,
-      subject: t.subject,
-      body: t.body,
-      otp: t.otp,
-      hasAttachments: t.hasAttachments,
-      receivedAt: new Date(now - offset * 60_000).toISOString(),
-      read: false,
-    };
-  });
-}
-
-function readStored(): TemporaryEmail[] | null {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as TemporaryEmail[]) : null;
-  } catch {
-    return null;
-  }
-}
-
-function persist(accounts: TemporaryEmail[]): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(accounts));
-  } catch {
-    // Storage full or unavailable — the demo still works in memory.
-  }
-}
-
-/** Recompute active/expired from expiresAt so old addresses expire on load. */
-function withFreshStatus(accounts: TemporaryEmail[]): TemporaryEmail[] {
-  const now = Date.now();
-  return accounts.map((a) => ({
-    ...a,
-    status: new Date(a.expiresAt).getTime() <= now ? "expired" : "active",
-  }));
-}
-
-function loadAccounts(): TemporaryEmail[] {
-  const stored = readStored();
-  if (stored) return withFreshStatus(stored);
-  const seeded = withFreshStatus(buildSeedAccounts());
-  persist(seeded);
-  return seeded;
-}
-
-function saveAccount(updated: TemporaryEmail): void {
-  const accounts = loadAccounts().map((a) => (a.id === updated.id ? updated : a));
-  persist(accounts);
-}
-
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-export function createTemporaryEmail(opts: {
+async function loadAccount(id: string): Promise<TemporaryEmail | undefined> {
+  const sb = requireSupabase();
+  const { data: addr, error: addrError } = await sb
+    .from("temp_addresses")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (addrError || !addr) return undefined;
+
+  const [emailsRes, usageRes] = await Promise.all([
+    sb.from("emails").select("*").eq("address_id", id).order("received_at", { ascending: false }),
+    sb.from("website_usage").select("*").eq("address_id", id).order("first_seen_at", { ascending: true }),
+  ]);
+  if (emailsRes.error) throw new Error(`Could not load inbox: ${emailsRes.error.message}`);
+  if (usageRes.error) throw new Error(`Could not load usage: ${usageRes.error.message}`);
+
+  const row = addr as AddressRow;
+  return {
+    id: row.id,
+    address: row.address,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    status: freshStatus(row.expires_at),
+    emails: ((emailsRes.data ?? []) as EmailRow[]).map(toEmail),
+    websitesUsed: ((usageRes.data ?? []) as UsageRow[]).map(toUsage),
+  };
+}
+
+export async function createTemporaryEmail(opts: {
   username?: string;
   durationMinutes: number;
-}): TemporaryEmail {
+}): Promise<TemporaryEmail> {
+  const sb = requireSupabase();
   const username = opts.username?.trim() || randomUsername();
-  const now = Date.now();
-  const account: TemporaryEmail = {
-    id: randomId("account"),
-    address: `${username}@${siteConfig.domain}`,
-    createdAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + opts.durationMinutes * 60_000).toISOString(),
-    status: "active",
-    emails: seedInbox(now),
-    websitesUsed: [],
-  };
-  persist([account, ...loadAccounts()]);
+  const address = `${username}@${siteConfig.domain}`;
+  const expiresAt = new Date(Date.now() + opts.durationMinutes * 60_000).toISOString();
+
+  const { data, error } = await sb
+    .from("temp_addresses")
+    .insert({ address, expires_at: expiresAt })
+    .select()
+    .single();
+  if (error || !data) {
+    throw new Error(`Could not create email address: ${error?.message ?? "unknown error"}`);
+  }
+  const row = data as AddressRow;
+  addMyId(row.id);
+
+  // Seed one welcome email (with a sample OTP) so the inbox, viewer, and
+  // copy-code UI are demonstrable before real emails arrive via webhook.
+  const otp = String(Math.floor(100000 + Math.random() * 900000));
+  const { error: mailError } = await sb.from("emails").insert({
+    address_id: row.id,
+    sender_name: "TempMail Team",
+    sender_email: `welcome@${siteConfig.domain}`,
+    subject: "Welcome to your temporary inbox",
+    body:
+      `Your temporary address ${address} is ready.\n\n` +
+      `Any email sent to this address will appear here once real email ` +
+      `receiving is connected (domain + inbound email service — see README).\n\n` +
+      `Here is a sample verification code so you can try the copy button:`,
+    otp,
+  });
+  if (mailError) throw new Error(`Address created, but the welcome email failed: ${mailError.message}`);
+
+  const account = await loadAccount(row.id);
+  if (!account) throw new Error("Address was created but could not be loaded.");
   return account;
 }
 
-export function getAccounts(): TemporaryEmail[] {
-  return loadAccounts();
+/** Addresses created in this browser, newest first. */
+export async function getAccounts(): Promise<TemporaryEmail[]> {
+  const ids = readMyIds();
+  if (ids.length === 0) return [];
+  const accounts = await Promise.all(ids.map((id) => loadAccount(id)));
+  return accounts.filter((a): a is TemporaryEmail => a !== undefined);
 }
 
-export function getAccount(id: string): TemporaryEmail | undefined {
-  return loadAccounts().find((a) => a.id === id);
+export async function getAccount(id: string): Promise<TemporaryEmail | undefined> {
+  return loadAccount(id);
 }
 
 /** Most recently created address that hasn't expired yet. */
-export function getLatestActiveAccount(): TemporaryEmail | undefined {
-  return loadAccounts().find((a) => a.status === "active");
+export async function getLatestActiveAccount(): Promise<TemporaryEmail | undefined> {
+  return (await getAccounts()).find((a) => a.status === "active");
 }
 
-export function deleteAccount(id: string): void {
-  persist(loadAccounts().filter((a) => a.id !== id));
+export async function deleteAccount(id: string): Promise<void> {
+  const sb = requireSupabase();
+  const { error } = await sb.from("temp_addresses").delete().eq("id", id);
+  if (error) throw new Error(`Could not delete address: ${error.message}`);
+  removeMyId(id); // emails + usage rows are removed by ON DELETE CASCADE
 }
 
-export function getInbox(accountId: string): Email[] {
-  const account = getAccount(accountId);
-  if (!account) return [];
-  return [...account.emails].sort(
-    (a, b) => new Date(b.receivedAt).getTime() - new Date(a.receivedAt).getTime(),
-  );
+export async function getInbox(accountId: string): Promise<Email[]> {
+  const sb = requireSupabase();
+  const { data, error } = await sb
+    .from("emails")
+    .select("*")
+    .eq("address_id", accountId)
+    .order("received_at", { ascending: false });
+  if (error) throw new Error(`Could not load inbox: ${error.message}`);
+  return ((data ?? []) as EmailRow[]).map(toEmail);
 }
 
-export function getEmail(accountId: string, emailId: string): Email | undefined {
-  return getAccount(accountId)?.emails.find((e) => e.id === emailId);
+export async function getEmail(accountId: string, emailId: string): Promise<Email | undefined> {
+  return (await getInbox(accountId)).find((e) => e.id === emailId);
 }
 
-export function markEmailAsRead(accountId: string, emailId: string): void {
-  const account = getAccount(accountId);
-  if (!account) return;
-  saveAccount({
-    ...account,
-    emails: account.emails.map((e) => (e.id === emailId ? { ...e, read: true } : e)),
-  });
+export async function markEmailAsRead(accountId: string, emailId: string): Promise<void> {
+  const sb = requireSupabase();
+  const { error } = await sb
+    .from("emails")
+    .update({ is_read: true })
+    .eq("id", emailId)
+    .eq("address_id", accountId);
+  if (error) throw new Error(`Could not mark email as read: ${error.message}`);
 }
 
-export function deleteInboxEmail(accountId: string, emailId: string): void {
-  const account = getAccount(accountId);
-  if (!account) return;
-  saveAccount({ ...account, emails: account.emails.filter((e) => e.id !== emailId) });
+export async function deleteInboxEmail(accountId: string, emailId: string): Promise<void> {
+  const sb = requireSupabase();
+  const { error } = await sb
+    .from("emails")
+    .delete()
+    .eq("id", emailId)
+    .eq("address_id", accountId);
+  if (error) throw new Error(`Could not delete email: ${error.message}`);
 }
 
 /**
- * Simulates a new email arriving (the "Refresh" button). Picks the next mock
- * template not already in the inbox, cycling back to the start when exhausted.
- * Returns the new email, or null if the account doesn't exist / is expired.
+ * Re-fetch the inbox from Supabase (the "Refresh" button). Returns the
+ * current messages, newest first. New emails appear here once the inbound
+ * email webhook (see README) is connected.
  */
-export function simulateIncomingEmail(accountId: string): Email | null {
-  const account = getAccount(accountId);
-  if (!account || account.status === "expired") return null;
-
-  const usedSubjects = new Set(account.emails.map((e) => e.subject));
-  const template =
-    mockInboxTemplates.find((t) => !usedSubjects.has(t.subject)) ??
-    mockInboxTemplates[account.emails.length % mockInboxTemplates.length];
-
-  const email: Email = {
-    id: randomId("email"),
-    senderName: template.senderName,
-    sender: template.sender,
-    subject: template.subject,
-    body: template.body,
-    otp: template.otp,
-    hasAttachments: template.hasAttachments,
-    receivedAt: new Date().toISOString(),
-    read: false,
-  };
-  saveAccount({ ...account, emails: [email, ...account.emails] });
-  return email;
+export async function refreshInbox(accountId: string): Promise<Email[]> {
+  return getInbox(accountId);
 }
 
-export function getUsage(accountId: string): WebsiteUsage[] {
-  return getAccount(accountId)?.websitesUsed ?? [];
+export async function getUsage(accountId: string): Promise<WebsiteUsage[]> {
+  const sb = requireSupabase();
+  const { data, error } = await sb
+    .from("website_usage")
+    .select("*")
+    .eq("address_id", accountId)
+    .order("first_seen_at", { ascending: true });
+  if (error) throw new Error(`Could not load usage: ${error.message}`);
+  return ((data ?? []) as UsageRow[]).map(toUsage);
 }
 
-export function addWebsiteUsage(accountId: string, website: string): WebsiteUsage | null {
-  const account = getAccount(accountId);
-  const name = website.trim();
-  if (!account || !name) return null;
-  if (account.websitesUsed.some((w) => w.website.toLowerCase() === name.toLowerCase())) {
-    return null; // already listed
+export async function addWebsiteUsage(
+  accountId: string,
+  website: string,
+): Promise<WebsiteUsage | null> {
+  const sb = requireSupabase();
+  const name = website.trim().toLowerCase();
+  if (!name) return null;
+  const existing = await getUsage(accountId);
+  if (existing.some((w) => w.website.toLowerCase() === name)) return null; // already listed
+
+  const { data, error } = await sb
+    .from("website_usage")
+    .insert({ address_id: accountId, website: name })
+    .select()
+    .single();
+  if (error) {
+    // Unique-violation race: treat as "already listed".
+    if (error.code === "23505") return null;
+    throw new Error(`Could not save website: ${error.message}`);
   }
-  const usage: WebsiteUsage = {
-    website: name,
-    firstSeen: new Date().toISOString(),
-    status: "active",
-  };
-  saveAccount({ ...account, websitesUsed: [...account.websitesUsed, usage] });
-  return usage;
+  return toUsage(data as UsageRow);
 }
+
+// ─── Pure helpers (no network — safe to call during render) ─────────────────
 
 export function isExpired(account: TemporaryEmail): boolean {
   return account.status === "expired" || new Date(account.expiresAt).getTime() <= Date.now();

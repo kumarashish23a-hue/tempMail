@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { EmptyState } from "../components/EmptyState";
+import { LoadingState } from "../components/LoadingState";
 import { UsageList } from "../components/UsageList";
 import {
   addWebsiteUsage,
@@ -10,7 +11,19 @@ import type { TemporaryEmail } from "../types";
 
 /** Route /usage — "where was it used" for the latest active address. */
 export function UsagePage() {
-  const [account, setAccount] = useState<TemporaryEmail | null>(() => getLatestActiveAccount() ?? null);
+  const [account, setAccount] = useState<TemporaryEmail | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    getLatestActiveAccount()
+      .then((a) => setAccount(a ?? null))
+      .catch(() => setAccount(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <LoadingState message="Loading usage..." />;
+  }
 
   if (!account) {
     return (
@@ -29,9 +42,9 @@ export function UsagePage() {
     );
   }
 
-  const handleAdd = (website: string) => {
-    addWebsiteUsage(account.id, website);
-    setAccount(getLatestActiveAccount() ?? null);
+  const handleAdd = async (website: string) => {
+    await addWebsiteUsage(account.id, website);
+    setAccount((await getLatestActiveAccount()) ?? null);
   };
 
   return (
@@ -42,7 +55,7 @@ export function UsagePage() {
           {account.address}
         </p>
         <p className="mt-1 text-sm text-slate-400">
-          Demo data — nothing is tracked for real in this prototype.
+          Addresses and usage are stored in Supabase.
         </p>
       </div>
       <UsageList usages={account.websitesUsed} onAdd={handleAdd} />

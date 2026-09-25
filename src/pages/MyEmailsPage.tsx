@@ -1,20 +1,33 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { EmailCard } from "../components/EmailCard";
 import { EmptyState } from "../components/EmptyState";
+import { LoadingState } from "../components/LoadingState";
 import { deleteAccount, getAccounts } from "../services/emailService";
 import type { TemporaryEmail } from "../types";
 
-/** Route /emails — all temporary addresses ever created (localStorage). */
+/** Route /emails — temporary addresses created in this browser. */
 export function MyEmailsPage() {
-  const [accounts, setAccounts] = useState<TemporaryEmail[]>(() => getAccounts());
+  const [accounts, setAccounts] = useState<TemporaryEmail[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const handleDelete = (id: string) => {
-    if (window.confirm("Delete this temporary email? This only removes the demo data.")) {
-      deleteAccount(id);
-      setAccounts(getAccounts());
+  useEffect(() => {
+    getAccounts()
+      .then(setAccounts)
+      .catch(() => setAccounts([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleDelete = async (id: string) => {
+    if (window.confirm("Delete this temporary email? This removes it from the database.")) {
+      await deleteAccount(id);
+      setAccounts(await getAccounts());
     }
   };
+
+  if (loading) {
+    return <LoadingState message="Loading your emails..." />;
+  }
 
   return (
     <div className="space-y-6">

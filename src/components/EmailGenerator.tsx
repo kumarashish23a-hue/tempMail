@@ -16,8 +16,10 @@ export function EmailGenerator({ onCreated }: EmailGeneratorProps) {
   );
   const [customMinutes, setCustomMinutes] = useState("45");
   const [username, setUsername] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     let minutes: number;
     if (duration === "custom") {
       minutes = Math.max(1, parseInt(customMinutes, 10) || 60);
@@ -26,11 +28,19 @@ export function EmailGenerator({ onCreated }: EmailGeneratorProps) {
     }
     // Allow pasting a full address — only the part before "@" is used.
     const cleanUsername = username.trim().split("@")[0].replace(/\s+/g, "");
-    const account = createTemporaryEmail({
-      username: cleanUsername || undefined,
-      durationMinutes: minutes,
-    });
-    onCreated(account);
+    setBusy(true);
+    setError(null);
+    try {
+      const account = await createTemporaryEmail({
+        username: cleanUsername || undefined,
+        durationMinutes: minutes,
+      });
+      onCreated(account);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not create the email address.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const inputClass =
@@ -42,8 +52,8 @@ export function EmailGenerator({ onCreated }: EmailGeneratorProps) {
         Create Temporary Email
       </h2>
       <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-        Pick how long the address stays active, then generate it. Demo only — no
-        real emails are received.
+        Pick how long the address stays active, then generate it. Stored in
+        Supabase — real emails arrive once the inbound webhook is connected.
       </p>
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2">
@@ -100,10 +110,16 @@ export function EmailGenerator({ onCreated }: EmailGeneratorProps) {
       <button
         type="button"
         onClick={handleGenerate}
-        className="mt-6 w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 sm:w-auto sm:px-8"
+        disabled={busy}
+        className="mt-6 w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-wait disabled:opacity-60 sm:w-auto sm:px-8"
       >
-        Generate Email
+        {busy ? "Generating..." : "Generate Email"}
       </button>
+      {error && (
+        <p className="mt-3 text-sm font-medium text-red-600 dark:text-red-400" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
